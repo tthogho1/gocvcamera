@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>WebRTC Client</title>
+    <style>
+      video {
+        width: 640px;
+        height: 480px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WebRTC Client</h1>
+
+    <div>
+      <button onclick="startSignaling()">Start Signaling</button>
+    </div>
+
+    <div>
+      <label for="answerSdp">Remote SDP:</label>
+      <br />
+      <textarea id="remoteSdp" rows="5" cols="60"></textarea>
+      <br />
+      <button onclick="sendRemoteSdp()">Send SDP</button>
+    </div>
+
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <script>
+      const remoteVideo = document.getElementById('remoteVideo');
+      const remoteSdpInput = document.getElementById('remoteSdp');
+      let peerConnection;
+      let websocket;
+      let clientId;
+
+      function startSignaling() {
+        websocket = new WebSocket('ws://localhost:8080');
+
+        websocket.onopen = () => {
+          console.log('Connected to WebSocket server');
+        };
+
+        websocket.onmessage = async event => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'connected') {
+              clientId = data.id;
+              console.log('My Client ID:', clientId);
+              await createOffer();
+            } else if (data.type === 'offer' && data.from !== clientId) {
+              console.log('Received Offer SDP:', data.sdp);
+              remoteSdpInput.value = JSON.stringify(data.sdp);
+            } else if (data.type === 'answer' && data.from !== clientId) {
+              console.log('Received Answer SDP:', data.sdp);
+              await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            } else if (data.type === 'candidate' && data.from !== clientId) {
+              console.log('Received ICE Candidate:', data.candidate);
+              await peerConnection.addIceCandidate(data.candidate);
+            }
+          } catch (error) {
+            console.error('Error processing WebSocket message:', error);
+          }
+        };
+
+        websocket.onclose = () => {
+          console.log('Disconnected from WebSocket server');
+        };
+
+        websocket.onerror = error => {
+          console.error('WebSocket error:', error);
+        };
+      }
+
+      async function createOffer() {
+        const config = {
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        };
+
+        peerConnection = new RTCPeerConnection(config);
+
+        peerConnection.ontrack = event => {
+          if (event.track.kind === 'video') {
+            remoteVideo.srcObject = event.streams[0];
+          }
+        };
+
+        peerConnection.onicecandidate = event => {
+          if (event.candidate) {
+            websocket.send(
+              JSON.stringify({
+                type: 'candidate',
+                candidate: event.candidate,
+                from: clientId,
+              })
+            );
+            console.log('Sent ICE Candidate:', event.candidate);
+          }
+        };
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        websocket.send(
+          JSON.stringify({
+            type: 'offer',
+            sdp: peerConnection.localDescription.toJSON(),
+            from: clientId,
+          })
+        );
+        console.log('Sent Offer SDP:', JSON.stringify(peerConnection.localDescription.toJSON()));
+      }
+
+      async function sendRemoteSdp() {
+        const remoteSdp = JSON.parse(remoteSdpInput.value);
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteSdp));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+
+        websocket.send(
+          JSON.stringify({
+            type: 'answer',
+            sdp: peerConnection.localDescription.toJSON(),
+            from: clientId,
+          })
+        );
+        console.log('Sent Answer SDP:', JSON.stringify(peerConnection.localDescription.toJSON()));
+      }
+
+      // ... (必要に応じて他の関数を追加) ...
+      function hangUp() {
+        console.log('Hanging up.');
+        if (peerConnection) {
+          peerConnection.close();
+          peerConnection = null;
+        }
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          websocket.close();
+        }
+      }
+      window.addEventListener('beforeunload', () => {
+        hangUp();
+      });
+    </script>
+  </body>
+</html>

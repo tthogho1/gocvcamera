@@ -1,0 +1,19 @@
+{
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.2"
+  },
+  "ts-node": {
+    "esm": true,
+    "experimentalSpecifierResolution": "node"
+  }
+}
