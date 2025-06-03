@@ -1,0 +1,247 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+
+	"github.com/gorilla/websocket"
+	"github.com/pion/mediadevices"
+	"github.com/pion/mediadevices/pkg/codec/vpx"
+	"github.com/pion/mediadevices/pkg/prop"
+	"github.com/pion/webrtc/v4"
+	"gocv.io/x/gocv"
+)
+
+
+func main() {
+   //"C:\msys64\mingw64\lib\pkgconfig\portaudio-2.0.pc"
+	 // "C:\msys64\mingw64\lib\pkgconfig\portaudio-2.0.pc" は、
+	 // 「PortAudio（ポートオーディオ）」というクロスプラットフォーム対応の
+	 // オープンソース音声入出力ライブラリの設定ファイル（pkg-config用）です。
+	 //
+	 // このファイルは、PortAudioのインストールパスやバージョン情報を含んでおり、
+	 // $env:PKG_CONFIG_PATH="C:\msys64\mingw64\lib\pkgconfig"
+	 // 環境変数を設定することで、GoのビルドシステムがPortAudioを正しく認識できるようになります。
+
+// // Initialize PortAudio
+// if err := portaudio.Initialize(); err != nil {
+// 	log.Fatalf("failed to initialize PortAudio: %v", err)
+// }
+// defer portaudio.Terminate()
+
+	// Open the webcam with device ID 0
+	webcam, err := gocv.OpenVideoCapture(0)
+	if err != nil {
+		panic("failed to open webcam: " + err.Error())
+	}
+	defer webcam.Close()
+
+	// Create a window to display the video
+	window := gocv.NewWindow("Webcam")
+	defer window.Close()
+
+	// Create a Mat for images
+	img := gocv.NewMat()
+	defer img.Close()
+
+	// Create a MediaEngine object
+	mediaEngine := &webrtc.MediaEngine{}
+
+	// Register the VP8 codec
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeVP8,
+			ClockRate:   90000,
+			Channels:    0,
+			SDPFmtpLine: "",
+			RTCPFeedback: nil,
+		},
+		PayloadType: 96, // Recommended PayloadType for VP8
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		log.Fatalf("failed to register VP8 codec: %v", err)
+	}
+
+	// Create the API with the MediaEngine
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
+
+	// Configure ICE
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
+	}
+
+	// Create a new RTCPeerConnection
+	peerConnection, err := api.NewPeerConnection(config)
+	if err != nil {
+		log.Fatalf("failed to create new PeerConnection: %v", err)
+	}
+	defer peerConnection.Close()
+
+	// Create a video track
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "webcam")
+	if err != nil {
+		log.Fatalf("failed to create video track: %v", err)
+	}
+
+	// Add the video track to the PeerConnection
+	rtpSender, err := peerConnection.AddTrack(videoTrack)
+	if err != nil {
+		log.Fatalf("failed to add video track: %v", err)
+	}
+
+	// Read incoming RTCP packets
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, err := rtpSender.Read(rtcpBuf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// WebSocket server address
+	wsURL := "ws://localhost:8080"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		log.Fatalf("failed to connect to WebSocket server: %v", err)
+	}
+	defer conn.Close()
+	log.Println("Connected to WebSocket server")
+
+	var clientID string
+
+	// Receive WebSocket messages
+	go func() {
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("read:", err)
+				return
+			}
+			log.Printf("Received message from server: %s", message)
+			var msg map[string]interface{}
+			if err := json.Unmarshal(message, &msg); err == nil {
+				msgType := msg["type"]
+				if msgType == "answer" {
+					sdpMap := msg["sdp"].(map[string]interface{})
+					sdpJSON, _ := json.Marshal(sdpMap)
+					var answer webrtc.SessionDescription
+					if err := json.Unmarshal(sdpJSON, &answer); err == nil {
+						log.Println("Setting remote description (answer)")
+						if err := peerConnection.SetRemoteDescription(answer); err != nil {
+							log.Println("Error setting remote description:", err)
+						}
+					}
+				} else if msgType == "candidate" {
+					candidateMap := msg["candidate"].(map[string]interface{})
+					candidateJSON, _ := json.Marshal(candidateMap)
+					var candidate webrtc.ICECandidateInit
+					if err := json.Unmarshal(candidateJSON, &candidate); err == nil {
+						log.Println("Adding ICE candidate")
+						if err := peerConnection.AddICECandidate(candidate); err != nil {
+							log.Println("Error adding ICE candidate:", err)
+						}
+					}
+				} else if msgType == "connected" {
+					clientID = msg["id"].(string)
+					log.Println("My Client ID:", clientID)
+					// Create and send offer
+					offer, err := peerConnection.CreateOffer(nil)
+					if err != nil {
+						log.Println("Error creating offer:", err)
+						return
+					}
+					gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+					peerConnection.SetLocalDescription(offer)
+					<-gatherComplete
+					offerJSON, _ := json.Marshal(offer)
+					conn.WriteJSON(map[string]interface{}{
+						"type": "offer",
+						"sdp":  json.RawMessage(offerJSON),
+						"from": clientID,
+					})
+					log.Printf("Sent Offer SDP:\n%s\n", offer.SDP)
+				}
+			}
+		}
+	}()
+
+	// Handle ICE candidates
+	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			candidateJSON, _ := json.Marshal(candidate.ToJSON())
+			conn.WriteJSON(map[string]interface{}{
+				"type":      "candidate",
+				"candidate": json.RawMessage(candidateJSON),
+				"from":      clientID,
+			})
+			log.Println("Sent ICE candidate")
+		}
+	})
+
+
+	// Main loop to capture and send video frames
+	// mediadevicesでカメラストリーム取得し、WebRTC送信とローカル表示を同時に実行する。
+	// 1. mediadevicesでカメラストリーム取得
+	vp8Params, err := vpx.NewVP8Params()
+	if err != nil {
+		panic(err)
+	}
+	vp8Params.BitRate = 1_000_000 // 1Mbps
+
+	// コーデックセレクターを作成
+	// codecSelector := mediadevices.NewCodecSelector(
+	// 		mediadevices.WithVideoEncoders(&vp8Params),
+	// )
+	fmt.Println("Using VP8 codec with bitrate:", vp8Params.BitRate)
+	devices := mediadevices.EnumerateDevices()
+	fmt.Printf("Found %d devices\n", len(devices))
+	for _, d := range devices {
+		fmt.Printf("Device: %+v\n", d)
+	}
+
+	stream, err := mediadevices.GetUserMedia(mediadevices.MediaStreamConstraints{
+		Video: func(constraint *mediadevices.MediaTrackConstraints) {
+			// 理想的な解像度を指定
+			constraint.Width = prop.Int(600)
+			constraint.Height = prop.Int(400)
+		},
+		Audio: func(constraint *mediadevices.MediaTrackConstraints) {
+			// 必要であればサンプリングレート等も指定可能
+		},
+		//Codec: codecSelector, // 使用可能なコーデックを指定
+	})
+
+	if err != nil {
+		log.Fatalf("failed to get user media: %v", err)
+	}
+
+	// 2. WebRTC送信用にトラックをPeerConnectionに追加（goroutine外で実行）
+	for _, track := range stream.GetTracks() {
+		peerConnection.AddTrack(track)
+	}
+
+	// 3. ローカル表示用のgoroutineを起動
+	go func() {
+		videoTrack := stream.GetVideoTracks()[0].(*mediadevices.VideoTrack)
+		reader := videoTrack.NewReader(false)
+		for {
+			frame, release, err := reader.Read()
+			if err != nil {
+				break
+			}
+
+			// frameをgocvで表示（例）
+			mat, _ := gocv.ImageToMatRGB(frame)
+			window.IMShow(mat)
+			window.WaitKey(1)
+
+			release()
+		}
+	}()
+
+}
