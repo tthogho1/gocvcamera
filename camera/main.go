@@ -79,50 +79,52 @@ func main() {
             }
             log.Printf("Received message from server: %s", message)
             var msg map[string]interface{}
-            if err := json.Unmarshal(message, &msg); err == nil {
-                msgType := msg["type"]
-                if msgType == "offer" {
-                    // Offerを受信したらRemoteDescriptionにセット
-                    sdpMap := msg["sdp"].(map[string]interface{})
-                    sdpJSON, _ := json.Marshal(sdpMap)
-                    var offer webrtc.SessionDescription
-                    if err := json.Unmarshal(sdpJSON, &offer); err == nil {
-                        log.Println("Setting remote description (offer)")
-                        if err := peerConnection.SetRemoteDescription(offer); err != nil {
-                            log.Println("Error setting remote description:", err)
-                            return
-                        }
-                    }
-                    // Answerを生成して送信
-                    answer, err := peerConnection.CreateAnswer(nil)
-                    if err != nil {
-                        log.Println("Error creating answer:", err)
+            if err := json.Unmarshal(message, &msg); err != nil {
+                log.Printf("json.Unmarshal error: %s", err)
+                continue
+            }
+            msgType := msg["type"]
+            if msgType == "offer" {
+                // Offerを受信したらRemoteDescriptionにセット
+                sdpMap := msg["sdp"].(map[string]interface{})
+                sdpJSON, _ := json.Marshal(sdpMap)
+                var offer webrtc.SessionDescription
+                if err := json.Unmarshal(sdpJSON, &offer); err == nil {
+                    log.Println("Setting remote description (offer)")
+                    if err := peerConnection.SetRemoteDescription(offer); err != nil {
+                        log.Println("Error setting remote description:", err)
                         return
                     }
-                    gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
-                    peerConnection.SetLocalDescription(answer)
-                    <-gatherComplete
-                    answerJSON, _ := json.Marshal(answer)
-                    conn.WriteJSON(map[string]interface{}{
-                        "type": "answer",
-                        "sdp":  json.RawMessage(answerJSON),
-                        "from": clientID,
-                    })
-                    log.Printf("Sent Answer SDP:\n%s\n", answer.SDP)
-                } else if msgType == "candidate" {
-                    candidateMap := msg["candidate"].(map[string]interface{})
-                    candidateJSON, _ := json.Marshal(candidateMap)
-                    var candidate webrtc.ICECandidateInit
-                    if err := json.Unmarshal(candidateJSON, &candidate); err == nil {
-                        log.Println("Adding ICE candidate")
-                        if err := peerConnection.AddICECandidate(candidate); err != nil {
-                            log.Println("Error adding ICE candidate:", err)
-                        }
-                    }
-                } else if msgType == "connected" {
-                    clientID = msg["id"].(string)
-                    log.Println("My Client ID:", clientID)
                 }
+                // Answerを生成して送信
+                answer, err := peerConnection.CreateAnswer(nil)
+                if err != nil {
+                    log.Println("Error creating answer:", err)
+                    return
+                }
+                gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+                peerConnection.SetLocalDescription(answer)
+                <-gatherComplete
+                answerJSON, _ := json.Marshal(answer)
+                conn.WriteJSON(map[string]interface{}{
+                    "type": "answer",
+                    "sdp":  json.RawMessage(answerJSON),
+                    "from": clientID,
+                })
+                log.Printf("Sent Answer SDP:\n%s\n", answer.SDP)
+            } else if msgType == "candidate" {
+                candidateMap := msg["candidate"].(map[string]interface{})
+                candidateJSON, _ := json.Marshal(candidateMap)
+                var candidate webrtc.ICECandidateInit
+                if err := json.Unmarshal(candidateJSON, &candidate); err == nil {
+                    log.Println("Adding ICE candidate")
+                    if err := peerConnection.AddICECandidate(candidate); err != nil {
+                        log.Println("Error adding ICE candidate:", err)
+                    }
+                }
+            } else if msgType == "connected" {
+                clientID = msg["id"].(string)
+                log.Println("My Client ID:", clientID)
             }
         }
     }()
