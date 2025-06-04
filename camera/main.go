@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
@@ -22,6 +23,23 @@ var config = webrtc.Configuration{
         },
     },
 }
+
+func removeUpToFirstColon(s string) []byte {
+    idxColon := strings.Index(s, ":")
+    idxBrace := strings.Index(s, "{")
+
+    if idxColon == -1 {
+        // コロンがない場合は元の文字列を返す
+        return []byte(s)
+    }
+    if idxBrace != -1 && idxBrace < idxColon {
+        // {がコロンより先にある場合は削除せずに返す
+        return []byte(s)
+    }
+    // コロンの次の文字から末尾までをbyte配列に変換して返す
+    return []byte(s[idxColon+1:])
+}
+
 
 func main() {
     // GoCVでカメラを開く
@@ -69,6 +87,15 @@ func main() {
         }
     })
 
+
+    peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+        fmt.Println("ICE Connection State:", state)
+    })
+
+    peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+        fmt.Println("Peer Connection State has changed:", state.String())
+    })
+
     // WebSocketメッセージ受信
     go func() {
         for {
@@ -78,6 +105,9 @@ func main() {
                 return
             }
             log.Printf("Received message from server: %s", message)
+            // JSONメッセージをパース message の先頭にidが含まれている。
+            message = removeUpToFirstColon(string(message))
+
             var msg map[string]interface{}
             if err := json.Unmarshal(message, &msg); err != nil {
                 log.Printf("json.Unmarshal error: %s", err)
@@ -90,16 +120,16 @@ func main() {
                 sdpJSON, _ := json.Marshal(sdpMap)
                 var offer webrtc.SessionDescription
                 if err := json.Unmarshal(sdpJSON, &offer); err == nil {
-                    log.Println("Setting remote description (offer)")
+                    log.Printf("Setting remote description (offer)")
                     if err := peerConnection.SetRemoteDescription(offer); err != nil {
-                        log.Println("Error setting remote description:", err)
-                        return
+                        log.Printf("Error setting remote description: %s", err)
+                        continue
                     }
                 }
                 // Answerを生成して送信
                 answer, err := peerConnection.CreateAnswer(nil)
                 if err != nil {
-                    log.Println("Error creating answer:", err)
+                    log.Printf("Error creating answer:%s", err)
                     return
                 }
                 gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
@@ -117,9 +147,9 @@ func main() {
                 candidateJSON, _ := json.Marshal(candidateMap)
                 var candidate webrtc.ICECandidateInit
                 if err := json.Unmarshal(candidateJSON, &candidate); err == nil {
-                    log.Println("Adding ICE candidate")
+                    log.Printf("Adding ICE candidate")
                     if err := peerConnection.AddICECandidate(candidate); err != nil {
-                        log.Println("Error adding ICE candidate:", err)
+                        log.Printf("Error adding ICE candidate:%s", err)
                     }
                 }
             } else if msgType == "connected" {
